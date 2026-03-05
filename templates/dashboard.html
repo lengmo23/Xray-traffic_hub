@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xray Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-slate-900 text-gray-200 min-h-screen flex flex-col">
+    <nav class="bg-slate-800 border-b border-slate-700 p-4 sticky top-0 z-40 shadow-md">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <h1 class="text-xl font-bold text-white flex items-center gap-2">Xray Dashboard</h1>
+                <div class="flex items-center gap-2 text-xs bg-slate-900 px-2 py-1 rounded border border-slate-700">
+                    <span id="ws-status" class="w-2 h-2 rounded-full bg-red-500"></span>
+                    <span id="ws-text" class="text-slate-400">Connecting</span>
+                </div>
+            </div>
+            <div class="flex items-center gap-3">
+                <button onclick="openModal('addNodeModal')" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded transition">Add Node</button>
+                <button onclick="openModal('settingsModal')" class="text-sm bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded transition">Settings</button>
+                <button onclick="forceReport()" class="text-sm border border-slate-600 hover:bg-slate-700 text-white px-3 py-1.5 rounded transition">Push TG</button>
+                <a href="/logout" class="text-sm text-red-400 hover:text-red-300 ml-2">Logout</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="flex-1 p-4 md:p-8 max-w-7xl mx-auto w-full">
+        <div id="nodes-container" class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6"></div>
+    </main>
+
+    <div id="addNodeModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50">
+        <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">Add New Node</h2>
+                <button onclick="closeModal('addNodeModal')" class="text-slate-400 hover:text-white">X</button>
+            </div>
+            <input id="newNodeId" type="text" placeholder="Node ID (e.g., hk-01)" class="w-full mb-4 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:border-indigo-500 outline-none">
+            <button onclick="generateCmd()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-lg transition">Generate Command</button>
+            <div id="cmdResult" class="mt-4 hidden">
+                <p class="text-sm text-green-400 mb-2">Run this on Node VPS:</p>
+                <div class="bg-slate-900 p-3 rounded border border-slate-700 relative">
+                    <code id="installCmd" class="text-xs text-indigo-300 break-all select-all font-mono"></code>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="renameModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50">
+        <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 w-full max-w-sm shadow-2xl">
+            <h2 class="text-xl font-bold text-white mb-4">Edit Display Name</h2>
+            <input type="hidden" id="renameTargetId">
+            <input id="renameInput" type="text" placeholder="Leave blank to reset" class="w-full mb-4 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:border-indigo-500 outline-none">
+            <div class="flex gap-3">
+                <button onclick="closeModal('renameModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg transition">Cancel</button>
+                <button onclick="submitRename()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 py-2 rounded-lg transition">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="settingsModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50">
+        <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">System Settings</h2>
+                <button onclick="closeModal('settingsModal')" class="text-slate-400 hover:text-white">X</button>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Telegram Bot Token</label>
+                    <input id="tgTokenInput" type="text" value="{{ config.get('tg_token', '') }}" class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white text-sm outline-none focus:border-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Telegram Chat ID</label>
+                    <input id="tgChatIdInput" type="text" value="{{ config.get('tg_chat_id', '') }}" class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white text-sm outline-none focus:border-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Secret Token (Internal)</label>
+                    <input type="text" value="{{ secret_token }}" readonly class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-indigo-400 text-sm outline-none cursor-not-allowed">
+                </div>
+            </div>
+            <button onclick="saveSettings()" class="w-full mt-6 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-lg transition">Save Settings</button>
+        </div>
+    </div>
+
+    <script>
+        const NODE_NAMES = {{ config.get('nodes', {}) | tojson }};
+        const SECRET_TOKEN = "{{ secret_token }}";
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'], i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function openModal(id) { document.getElementById(id).style.display = 'flex'; }
+        function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+
+        function generateCmd() {
+            const nodeId = document.getElementById('newNodeId').value.trim();
+            if(!nodeId) return alert('Enter Node ID');
+            const origin = "https://" + window.location.host;
+            const cmdText = `bash <(curl -s "${origin}/api/get_installer?node=${nodeId}&token=${SECRET_TOKEN}")`;
+            document.getElementById('installCmd').innerText = cmdText;
+            document.getElementById('cmdResult').style.display = 'block';
+        }
+
+        function openRename(nodeId) {
+            document.getElementById('renameTargetId').value = nodeId;
+            document.getElementById('renameInput').value = NODE_NAMES[nodeId] || nodeId;
+            openModal('renameModal');
+        }
+        
+        async function submitRename() {
+            const nodeId = document.getElementById('renameTargetId').value;
+            const newName = document.getElementById('renameInput').value.trim();
+            await fetch('/api/rename_node', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({node_id: nodeId, new_name: newName})
+            });
+            window.location.reload();
+        }
+
+        async function saveSettings() {
+            const token = document.getElementById('tgTokenInput').value.trim();
+            const chatId = document.getElementById('tgChatIdInput').value.trim();
+            await fetch('/api/save_settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tg_token: token, tg_chat_id: chatId})
+            });
+            alert('Settings Saved!');
+            closeModal('settingsModal');
+        }
+
+        async function forceReport() {
+            alert('Pushing to Telegram...');
+            fetch('/api/force_report?token=' + SECRET_TOKEN);
+        }
+
+        const container = document.getElementById('nodes-container');
+        let nodesData = {};
+
+        function render() {
+            container.innerHTML = '';
+            for (const [nodeId, users] of Object.keys(nodesData).sort().map(k => [k, nodesData[k]])) {
+                let rows = '';
+                let totalUp = 0, totalDown = 0;
+                const displayName = NODE_NAMES[nodeId] || nodeId;
+
+                for (const [user, stats] of Object.entries(users).sort((a,b) => (b[1].up+b[1].down) - (a[1].up+a[1].down))) {
+                    totalUp += stats.up; totalDown += stats.down;
+                    if(stats.up + stats.down > 0) {
+                        rows += `
+                            <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition">
+                                <td class="py-2.5 text-slate-300 truncate max-w-[100px]" title="${user}">${user}</td>
+                                <td class="py-2.5 text-green-400/90 text-right">${formatBytes(stats.up)}</td>
+                                <td class="py-2.5 text-blue-400/90 text-right">${formatBytes(stats.down)}</td>
+                                <td class="py-2.5 text-white font-mono text-right">${formatBytes(stats.up + stats.down)}</td>
+                            </tr>`;
+                    }
+                }
+
+                const card = `
+                    <div class="bg-slate-800 rounded-xl border border-slate-700 p-5 shadow-xl relative overflow-hidden transition-all hover:border-indigo-500/50">
+                        <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 to-purple-500"></div>
+                        <h2 class="text-lg font-bold text-white mb-4 flex justify-between items-center group">
+                            <div class="flex items-center gap-2">
+                                <span>${displayName}</span>
+                                <button onclick="openRename('${nodeId}')" class="text-slate-500 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition" title="Edit Name">EDIT</button>
+                            </div>
+                            <span class="text-[10px] text-slate-400 bg-slate-900 px-2 py-1 rounded flex items-center gap-1.5 border border-slate-700">Live <span class="text-green-500 pulse">*</span></span>
+                        </h2>
+                        <div class="mb-5 flex justify-between text-sm bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                            <div><span class="text-slate-500 block text-xs mb-0.5">Upload</span> <span class="text-green-400 font-bold">${formatBytes(totalUp)}</span></div>
+                            <div class="text-right"><span class="text-slate-500 block text-xs mb-0.5">Download</span> <span class="text-blue-400 font-bold">${formatBytes(totalDown)}</span></div>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead>
+                                    <tr class="text-slate-500 text-left border-b border-slate-600">
+                                        <th class="pb-2 font-medium">User</th>
+                                        <th class="pb-2 font-medium text-right">Up</th>
+                                        <th class="pb-2 font-medium text-right">Down</th>
+                                        <th class="pb-2 font-medium text-right">Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </div>
+                    </div>`;
+                container.innerHTML += card;
+            }
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        function connectWS() {
+            const ws = new WebSocket(wsUrl);
+            ws.onopen = () => {
+                document.getElementById('ws-status').className = 'w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.8)]';
+                document.getElementById('ws-text').innerText = 'Connected';
+            };
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'init') { nodesData = msg.data || {}; } 
+                else if (msg.type === 'update') { nodesData[msg.node] = msg.data; }
+                render();
+            };
+            ws.onclose = () => {
+                document.getElementById('ws-status').className = 'w-2 h-2 rounded-full bg-red-500';
+                document.getElementById('ws-text').innerText = 'Reconnecting...';
+                setTimeout(connectWS, 3000);
+            };
+        }
+        connectWS();
+    </script>
+</body>
+</html>
