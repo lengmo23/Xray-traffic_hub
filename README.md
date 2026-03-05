@@ -15,4 +15,4 @@ A lightweight, centralized real-time traffic monitoring dashboard for multi-node
 Run the following command on a fresh Ubuntu/Debian/CentOS server to deploy the Master Hub:
 
 ```bash
-bash <(curl -s [https://raw.githubusercontent.com/lengmo23/Xray-traffic_hub/main/install.sh](https://raw.githubusercontent.com/lengmo23/Xray-traffic_hub/main/install.sh))
+bash <(curl -s https://raw.githubusercontent.com/lengmo23/Xray-traffic_hub/main/install.sh)
