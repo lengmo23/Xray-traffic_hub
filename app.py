@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, Response
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
 from flask_sock import Sock
 from apscheduler.schedulers.background import BackgroundScheduler
 from functools import wraps
 import requests, sys, datetime, json, os, uuid
 
-# --- 环境配置 ---
 PORT = 5000
 WEB_USER = os.environ.get("WEB_USER", "admin")
 WEB_PASS = os.environ.get("WEB_PASS", "admin123")
@@ -20,7 +19,6 @@ DAILY_CACHE = {}
 WS_CLIENTS = set()
 CONFIG_FILE = "/opt/traffic_monitor/data/config.json"
 
-# --- 数据持久化 (新增 tokens 字典管理一机一码) ---
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -35,7 +33,6 @@ CONFIG = load_config()
 if "nodes" not in CONFIG: CONFIG["nodes"] = {}
 if "tokens" not in CONFIG: CONFIG["tokens"] = {}
 
-# --- 权限保护拦截器 ---
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -43,7 +40,6 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# ================= HTML TEMPLATES =================
 HTML_LOGIN = """
 <!DOCTYPE html>
 <html>
@@ -111,8 +107,8 @@ HTML_DASHBOARD = """
                 <h2 class="text-xl font-bold text-white">Add / Update Node</h2>
                 <button onclick="closeModal('addNodeModal')" class="text-slate-400 hover:text-white">X</button>
             </div>
-            <p class="text-xs text-slate-400 mb-4">The system will auto-generate a unique cryptographic token for this specific node.</p>
-            <input id="newNodeId" type="text" placeholder="Node ID (e.g., hk-01)" class="w-full mb-4 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:border-indigo-500 outline-none">
+            <p class="text-xs text-slate-400 mb-4">Leave blank for auto-generated ID, or specify a unique English ID.</p>
+            <input id="newNodeId" type="text" placeholder="Leave blank for random ID" class="w-full mb-4 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:border-indigo-500 outline-none">
             <button onclick="generateCmd()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-lg transition">Generate Command</button>
             <div id="cmdResult" class="mt-4 hidden">
                 <p class="text-sm text-green-400 mb-2">Run this on Node VPS:</p>
@@ -167,10 +163,12 @@ HTML_DASHBOARD = """
         function openModal(id) { document.getElementById(id).style.display = 'flex'; }
         function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 
-        // --- 前端生成逻辑：调用后端生成节点专属 Token ---
         async function generateCmd() {
-            const nodeId = document.getElementById('newNodeId').value.trim();
-            if(!nodeId) return alert('Enter Node ID');
+            let nodeId = document.getElementById('newNodeId').value.trim();
+            // 【核心更新】留空则生成盲盒代号
+            if(!nodeId) {
+                nodeId = 'node-' + Math.random().toString(36).substring(2, 6);
+            }
             
             const res = await fetch('/api/add_node', {
                 method: 'POST',
@@ -181,7 +179,11 @@ HTML_DASHBOARD = """
             if(data.status !== 'success') return alert('Error generating node token');
 
             const origin = "https://" + window.location.host;
-            const cmdText = `bash <(curl -s "${origin}/api/get_installer?node=${nodeId}&token=${data.token}")`;
+            const endpoint = origin + "/api/upload_stats";
+            
+            // 【核心更新】对标 Komari 格式的极简安装命令
+            const githubRawUrl = "https://raw.githubusercontent.com/lengmo23/xray-traffic-hub/main/agent.sh";
+            const cmdText = `curl -sL ${githubRawUrl} | sudo bash -s -- -e ${endpoint} -t ${data.token}`;
             
             document.getElementById('installCmd').innerText = cmdText;
             document.getElementById('cmdResult').style.display = 'block';
@@ -216,7 +218,6 @@ HTML_DASHBOARD = """
             closeModal('settingsModal');
         }
 
-        // 强推报表直接依靠 Cookie 鉴权，不再暴露 Token
         async function forceReport() {
             alert('Pushing to Telegram...');
             fetch('/api/force_report');
@@ -303,7 +304,6 @@ HTML_DASHBOARD = """
 </html>
 """
 
-# ================= API & LOGIC =================
 @app.route('/')
 def index():
     if session.get('logged_in'): return redirect(url_for('dashboard_page'))
@@ -328,14 +328,12 @@ def logout():
 def dashboard_page():
     return render_template_string(HTML_DASHBOARD, config=CONFIG)
 
-# --- 核心新增：自动生成专属 Node Token ---
 @app.route('/api/add_node', methods=['POST'])
 @login_required
 def add_node():
     node_id = request.json.get('node_id')
     if not node_id: return jsonify({"status": "error"}), 400
     
-    # 派发专属独立 UUID 密钥
     node_token = str(uuid.uuid4())
     CONFIG['tokens'][node_id] = node_token
     save_config(CONFIG)
@@ -374,126 +372,44 @@ def websocket_route(ws):
 def get_total_traffic(data_dict):
     return sum(u.get('up',0) + u.get('down',0) for u in data_dict.values())
 
+# 【核心更新】看 Token 识人，节点端不再发送 node_id
 @app.route('/api/upload_stats', methods=['POST'])
 def upload_stats():
     req = request.json
-    node = req.get("node")
-    client_token = req.get("token")
+    if not req: return jsonify({"status": "error"}), 400
     
-    # 【一机一码鉴权】严格对比该节点专属的 Token
-    server_token = CONFIG.get('tokens', {}).get(node)
-    if not server_token or server_token != client_token:
-        return jsonify({"status": "error", "msg": "Unauthorized Node"}), 403
+    client_token = req.get("token")
+    node_id = None
+    
+    for nid, tk in CONFIG.get('tokens', {}).items():
+        if tk == client_token:
+            node_id = nid
+            break
+            
+    if not node_id:
+        return jsonify({"status": "error", "msg": "Unauthorized Token"}), 403
     
     date, data = req.get("date"), req.get("data")
     if not date: return jsonify({"error": "No date"}), 400
     if date not in DAILY_CACHE: DAILY_CACHE[date] = {}
     
-    old_data = DAILY_CACHE[date].get(node, {})
+    old_data = DAILY_CACHE[date].get(node_id, {})
     if get_total_traffic(data) >= get_total_traffic(old_data):
-        DAILY_CACHE[date][node] = data
+        DAILY_CACHE[date][node_id] = data
 
-    push_msg = json.dumps({"type": "update", "node": node, "data": data})
+    push_msg = json.dumps({"type": "update", "node": node_id, "data": data})
     for client in list(WS_CLIENTS):
         try: client.send(push_msg)
         except: WS_CLIENTS.remove(client)
         
     return jsonify({"status": "success"}), 200
 
-# 已去除暴露在公网的 Token 验证，转为强制登录保护
 @app.route('/api/force_report', methods=['GET'])
 @login_required
 def force_report():
     target = datetime.datetime.now().strftime("%Y-%m-%d")
     generate_report_and_send(target)
     return "Report Sent", 200
-
-@app.route('/api/get_installer', methods=['GET'])
-def get_installer():
-    node_name = request.args.get('node')
-    client_token = request.args.get('token')
-    
-    # 动态生成的下载脚本也必须验证专属 Token
-    server_token = CONFIG.get('tokens', {}).get(node_name)
-    if not server_token or server_token != client_token:
-        return "Forbidden", 403
-        
-    server_url = f"https://{request.host}/api/upload_stats"
-    
-    node_py_code = f'''#!/usr/bin/python3
-import json, subprocess, sys, requests, time
-from datetime import datetime
-
-NODE_ID = "{node_name}"
-SERVER_URL = "{server_url}"
-SECRET_TOKEN = "{client_token}"
-TOOL = "/usr/local/bin/xray"
-XRAY_API = "127.0.0.1:8080"
-
-def get_xray_data(reset=False):
-    cmd = [TOOL, "api", "statsquery", "--server="+XRAY_API, "--pattern", "user>>>"]
-    if reset: cmd.append("-reset")
-    try: return subprocess.check_output(cmd).decode("utf-8")
-    except: return "{{}}"
-
-def parse_traffic(raw):
-    traffic = {{}}
-    try: data = json.loads(raw)
-    except: return {{}}
-    for item in data.get("stat", []):
-        parts = item["name"].split(">>>")
-        if len(parts) < 4 or parts[0] != "user": continue
-        uid, metric, direct = parts[1], parts[2], parts[3]
-        if metric != "traffic": continue
-        val = int(item.get("value", "0"))
-        if uid not in traffic: traffic[uid] = {{"up":0, "down":0}}
-        if direct == "uplink": traffic[uid]["up"] += val
-        elif direct == "downlink": traffic[uid]["down"] += val
-    return traffic
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "reset_only":
-        get_xray_data(reset=True)
-        sys.exit(0)
-
-    while True:
-        today = datetime.now().strftime("%Y-%m-%d")
-        raw = get_xray_data(reset=False)
-        stats = parse_traffic(raw)
-        if stats:
-            try: requests.post(SERVER_URL, json={{"token":SECRET_TOKEN, "node":NODE_ID, "date":today, "data":stats}}, timeout=5)
-            except: pass
-        time.sleep(10)
-'''
-    shell_script = f"""#!/bin/bash
-echo "Installing Agent for: {node_name}..."
-if [ -f /etc/debian_version ]; then apt update && apt install -y python3 python3-requests; fi
-if [ -f /etc/redhat-release ]; then yum install -y python3 python3-requests; fi
-
-cat << 'PYEOF' > /opt/traffic_agent.py
-{node_py_code}
-PYEOF
-chmod +x /opt/traffic_agent.py
-
-cat << 'SRVEOF' > /etc/systemd/system/traffic_agent.service
-[Unit]
-Description=Xray Real-time Agent
-After=network.target
-[Service]
-ExecStart=/usr/bin/python3 /opt/traffic_agent.py
-Restart=always
-[Install]
-WantedBy=multi-user.target
-SRVEOF
-
-systemctl daemon-reload
-systemctl enable traffic_agent
-systemctl restart traffic_agent
-
-(crontab -l 2>/dev/null | grep -v "traffic_agent.py"; echo "59 23 * * * /usr/bin/python3 /opt/traffic_agent.py reset_only >> /var/log/traffic_reset.log 2>&1") | crontab -
-echo "Installed successfully!"
-"""
-    return Response(shell_script, mimetype='text/plain')
 
 def numfmt(num):
     if num >= 1024**4: return "%.2fTB" % (num / 1024**4)
