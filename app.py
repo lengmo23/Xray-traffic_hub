@@ -153,6 +153,7 @@ HTML_DASHBOARD = """
 
     <script>
         const NODE_NAMES = {{ config.get('nodes', {}) | tojson }};
+        const GH_USER = "{{ gh_user }}";
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -165,7 +166,6 @@ HTML_DASHBOARD = """
 
         async function generateCmd() {
             let nodeId = document.getElementById('newNodeId').value.trim();
-            // 【核心更新】留空则生成盲盒代号
             if(!nodeId) {
                 nodeId = 'node-' + Math.random().toString(36).substring(2, 6);
             }
@@ -181,8 +181,7 @@ HTML_DASHBOARD = """
             const origin = "https://" + window.location.host;
             const endpoint = origin + "/api/upload_stats";
             
-            // 【核心更新】对标 Komari 格式的极简安装命令
-            const githubRawUrl = "https://raw.githubusercontent.com/lengmo23/xray-traffic-hub/main/agent.sh";
+            const githubRawUrl = `https://raw.githubusercontent.com/${GH_USER}/Xray-traffic_hub/main/agent.sh`;
             const cmdText = `curl -sL ${githubRawUrl} | sudo bash -s -- -e ${endpoint} -t ${data.token}`;
             
             document.getElementById('installCmd').innerText = cmdText;
@@ -202,6 +201,19 @@ HTML_DASHBOARD = """
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({node_id: nodeId, new_name: newName})
+            });
+            window.location.reload();
+        }
+
+        // --- 核心：彻底删除节点逻辑 ---
+        async function deleteNode(nodeId) {
+            const displayName = NODE_NAMES[nodeId] || nodeId;
+            if(!confirm(`⚠️ 警告: 确定要删除节点 [${displayName}] 吗？\n删除后该节点将立即失去连接权限，且大屏数据会被清空！`)) return;
+            
+            await fetch('/api/delete_node', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({node_id: nodeId})
             });
             window.location.reload();
         }
@@ -252,7 +264,8 @@ HTML_DASHBOARD = """
                         <h2 class="text-lg font-bold text-white mb-4 flex justify-between items-center group">
                             <div class="flex items-center gap-2">
                                 <span>${displayName}</span>
-                                <button onclick="openRename('${nodeId}')" class="text-slate-500 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition" title="Edit Name">EDIT</button>
+                                <button onclick="openRename('${nodeId}')" class="text-slate-500 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition" title="Edit Name">✏️</button>
+                                <button onclick="deleteNode('${nodeId}')" class="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition ml-1" title="Delete Node">������️</button>
                             </div>
                             <span class="text-[10px] text-slate-400 bg-slate-900 px-2 py-1 rounded flex items-center gap-1.5 border border-slate-700">Live <span class="text-green-500 pulse">*</span></span>
                         </h2>
@@ -290,6 +303,7 @@ HTML_DASHBOARD = """
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'init') { nodesData = msg.data || {}; } 
                 else if (msg.type === 'update') { nodesData[msg.node] = msg.data; }
+                else if (msg.type === 'delete') { delete nodesData[msg.node]; }
                 render();
             };
             ws.onclose = () => {
@@ -326,7 +340,9 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard_page():
-    return render_template_string(HTML_DASHBOARD, config=CONFIG)
+    # 动态把 github 用户名传给前端，防止硬编码
+    gh_user = "lengmo23" 
+    return render_template_string(HTML_DASHBOARD, config=CONFIG, gh_user=gh_user)
 
 @app.route('/api/add_node', methods=['POST'])
 @login_required
@@ -348,6 +364,31 @@ def rename_node():
     if new_name == "": CONFIG['nodes'].pop(node_id, None)
     else: CONFIG['nodes'][node_id] = new_name
     save_config(CONFIG)
+    return jsonify({"status": "success"})
+
+# --- 核心新增：彻底删除节点接口 ---
+@app.route('/api/delete_node', methods=['POST'])
+@login_required
+def delete_node():
+    node_id = request.json.get('node_id')
+    if not node_id: return jsonify({"status": "error"}), 400
+
+    # 1. 吊销权限并清除别名
+    CONFIG.get('nodes', {}).pop(node_id, None)
+    CONFIG.get('tokens', {}).pop(node_id, None)
+    save_config(CONFIG)
+
+    # 2. 从今日内存缓存中彻底抹除
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    if today in DAILY_CACHE and node_id in DAILY_CACHE[today]:
+        DAILY_CACHE[today].pop(node_id, None)
+        
+        # 3. 通知所有在线的大屏立刻移除该节点
+        push_msg = json.dumps({"type": "delete", "node": node_id})
+        for client in list(WS_CLIENTS):
+            try: client.send(push_msg)
+            except: WS_CLIENTS.remove(client)
+
     return jsonify({"status": "success"})
 
 @app.route('/api/save_settings', methods=['POST'])
@@ -372,7 +413,6 @@ def websocket_route(ws):
 def get_total_traffic(data_dict):
     return sum(u.get('up',0) + u.get('down',0) for u in data_dict.values())
 
-# 【核心更新】看 Token 识人，节点端不再发送 node_id
 @app.route('/api/upload_stats', methods=['POST'])
 def upload_stats():
     req = request.json
